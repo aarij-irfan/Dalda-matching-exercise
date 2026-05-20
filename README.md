@@ -39,7 +39,8 @@ Double-click **`build_exe.bat`** — creates `release\Dalda Outlet Matcher\`. Co
 
 ## Using the app
 
-1. **Files** — Census is pre-loaded from `Census Database/`. Browse for Dalda’s outlet file (CSV/Excel). Choose output path.
+1. **View file** — Open any CSV/Excel without Microsoft Excel: browse file, see all columns (name, type, sample), scroll data with pages (500 rows per page). Use **View file** buttons on the Files tab for Dalda or census paths.
+2. **Files** — Census is pre-loaded from `Census Database/`. Browse for Dalda’s outlet file (CSV/Excel). Choose output path.
 2. **Column mapping** — Map Shop ID → `dalda_shop_id`, outlet name → `dalda_outlet_name`, GPS. Census defaults: `Serial` → `census_shop_id`, `Name of Outlet` → `census_outlet_name`.
 3. **Settings** — Search radius, score threshold, threads.
 4. **Run** — One output file; row count = Dalda row count.

@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app_paths import app_base_dir, default_census_dir
+from file_viewer import FileViewerWidget
 from match_worker import LoadPreviewWorker, MatchWorker, auto_detect_mappings
 from matching_engine import ColumnMapping, MatchSettings, list_census_files
 
@@ -66,8 +67,9 @@ class DaldaMatcherWindow(QMainWindow):
         header.setFont(QFont("", 10))
         root.addWidget(header)
 
-        tabs = QTabWidget()
-        root.addWidget(tabs)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs)
+        tabs = self.tabs
 
         # --- Files tab ---
         files_tab = QWidget()
@@ -81,10 +83,14 @@ class DaldaMatcherWindow(QMainWindow):
         census_refresh.clicked.connect(self._refresh_census_list)
         census_browse = QPushButton("Browse…")
         census_browse.clicked.connect(self._browse_census)
+        census_view_btn = QPushButton("View file")
+        census_view_btn.setToolTip("Open census file in the built-in viewer")
+        census_view_btn.clicked.connect(self._view_census_file)
         census_row = QHBoxLayout()
         census_row.addWidget(self.census_combo, stretch=1)
         census_row.addWidget(census_refresh)
         census_row.addWidget(census_browse)
+        census_row.addWidget(census_view_btn)
         census_form.addRow("Census file:", census_row)
         files_layout.addWidget(census_box)
 
@@ -94,9 +100,13 @@ class DaldaMatcherWindow(QMainWindow):
         self.dalda_path_edit.setPlaceholderText("Select CSV or Excel from Dalda…")
         dalda_browse = QPushButton("Browse…")
         dalda_browse.clicked.connect(self._browse_dalda)
+        dalda_view_btn = QPushButton("View file")
+        dalda_view_btn.setToolTip("Open Dalda file in the built-in viewer (no Excel needed)")
+        dalda_view_btn.clicked.connect(self._view_dalda_file)
         dalda_row = QHBoxLayout()
         dalda_row.addWidget(self.dalda_path_edit, stretch=1)
         dalda_row.addWidget(dalda_browse)
+        dalda_row.addWidget(dalda_view_btn)
         dalda_form.addRow("Dalda file:", dalda_row)
         self.dalda_info_label = QLabel("No file loaded")
         dalda_form.addRow("", self.dalda_info_label)
@@ -237,6 +247,10 @@ class DaldaMatcherWindow(QMainWindow):
         run_layout.addWidget(self.log_text)
         tabs.addTab(run_tab, "Run")
 
+        # --- View file tab (no Excel required) ---
+        self.file_viewer = FileViewerWidget()
+        tabs.addTab(self.file_viewer, "View file")
+
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
@@ -293,6 +307,22 @@ class DaldaMatcherWindow(QMainWindow):
         self._set_combo(self.census_lat_combo, mapping.latitude)
         self._set_combo(self.census_lon_combo, mapping.longitude)
         self._log(f"Census: {os.path.basename(path)} — {row_count:,} rows, {len(columns)} columns")
+
+    def _view_dalda_file(self):
+        path = self.dalda_path_edit.text().strip()
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "View file", "Select a valid Dalda file first.")
+            return
+        self.tabs.setCurrentWidget(self.file_viewer)
+        self.file_viewer.open_file(path)
+
+    def _view_census_file(self):
+        path = self.census_combo.currentData()
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "View file", "Select a valid census file first.")
+            return
+        self.tabs.setCurrentWidget(self.file_viewer)
+        self.file_viewer.open_file(path)
 
     def _browse_dalda(self):
         path, _ = QFileDialog.getOpenFileName(

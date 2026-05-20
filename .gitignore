@@ -12,3 +12,8 @@ _test_output*
 *.log
 .idea/
 .vscode/
+build/
+dist/
+release/
+build_venv/
+*.spec.bak

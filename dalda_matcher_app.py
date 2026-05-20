@@ -36,16 +36,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app_paths import app_base_dir, default_census_dir
 from match_worker import LoadPreviewWorker, MatchWorker, auto_detect_mappings
 from matching_engine import ColumnMapping, MatchSettings, list_census_files
-
-
-def app_base_dir() -> str:
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def default_census_dir() -> str:
-    return os.path.join(app_base_dir(), "Census Database")
 
 
 class DaldaMatcherWindow(QMainWindow):

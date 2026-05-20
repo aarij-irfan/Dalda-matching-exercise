@@ -2,7 +2,15 @@
 
 Match Dalda outlet lists against the Access Retail census database (GPS + shop name scoring). Produces **one Excel/CSV** with all Dalda columns, match scores, and all census columns.
 
-## Quick start (new computer)
+## Quick start — office PC (no internet, recommended)
+
+Use the **standalone .exe** (no Python, no pip):
+
+1. Copy the folder **`release\Dalda Outlet Matcher`** from USB (built on dev PC — see `BUILD_EXE.md`).
+2. Double-click **`Dalda Outlet Matcher.exe`**.
+3. Keep **`_internal`** and **`Census Database`** in the same folder as the .exe.
+
+## Quick start — with Python + internet
 
 1. Install **Python 3.10+** from [python.org](https://www.python.org/) — enable **“Add python.exe to PATH”**.
 2. Clone this repo:
@@ -15,6 +23,10 @@ Match Dalda outlet lists against the Access Retail census database (GPS + shop n
    - **Or:** `python setup_and_run.py`
 
 `setup_and_run.py` installs libraries from `requirements.txt` and opens the app.
+
+## Build the .exe (dev PC, once)
+
+Double-click **`build_exe.bat`** — creates `release\Dalda Outlet Matcher\`. Copy that whole folder to USB.
 
 ## What’s included
 

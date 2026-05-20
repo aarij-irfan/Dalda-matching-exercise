@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 import traceback
 
 import pandas as pd
@@ -88,15 +89,32 @@ class MatchWorker(QThread):
             census_df = prepare_census_coordinates(census_df, self.census_mapping)
             self.progress.emit(25, 100, f"Valid census GPS: {len(census_df):,} shops")
 
+            match_started = time.time()
+
+            def _fmt_eta(seconds: float) -> str:
+                if seconds < 60:
+                    return f"{seconds:.0f}s"
+                if seconds < 3600:
+                    return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+                return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
             def on_progress(done: int, total: int):
                 pct = 25 + int(70 * done / max(total, 1))
-                self.progress.emit(
-                    pct,
-                    100,
-                    f"Matching outlets… {done:,} / {total:,}",
+                elapsed = time.time() - match_started
+                rate = done / elapsed if elapsed > 0 and done > 0 else 0.0
+                remaining = (total - done) / rate if rate > 0 else 0.0
+                pct_done = 100.0 * done / max(total, 1)
+                msg = (
+                    f"Matching… {done:,} / {total:,} ({pct_done:.1f}%) | "
+                    f"{rate:.1f} outlets/s | ETA {_fmt_eta(remaining)}"
                 )
+                self.progress.emit(pct, 100, msg)
 
-            self.progress.emit(30, 100, f"Matching {dalda_count:,} Dalda outlets…")
+            self.progress.emit(
+                30,
+                100,
+                f"Matching {dalda_count:,} outlets ({self.settings.worker_threads} threads)…",
+            )
 
             result_df, stats = run_matching(
                 dalda_df=dalda_df,

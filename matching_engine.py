@@ -6,9 +6,11 @@ Adapted from Pepsi matching logic with spatial indexing for large census files.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from math import radians, cos, sin, asin, sqrt
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -587,6 +589,39 @@ def _match_one_row(
     return meta
 
 
+class _MatchProgress:
+    """Thread-safe progress counter (like Pepsi console updates, for the UI)."""
+
+    def __init__(
+        self,
+        total: int,
+        callback: Callable[[int, int], None] | None,
+        cancel_check: Callable[[], bool] | None,
+        report_every: int = 25,
+    ):
+        self.total = total
+        self.callback = callback
+        self.cancel_check = cancel_check
+        self.report_every = max(1, report_every)
+        self.done = 0
+        self.lock = threading.Lock()
+        self.started = time.time()
+        self._last_report = 0
+
+    def tick(self, count: int = 1) -> None:
+        if self.cancel_check and self.cancel_check():
+            raise InterruptedError("Matching cancelled")
+        with self.lock:
+            self.done += count
+            if self.callback and self.done - self._last_report >= self.report_every:
+                self._last_report = self.done
+                self.callback(self.done, self.total)
+
+    def finish(self) -> None:
+        if self.callback:
+            self.callback(self.total, self.total)
+
+
 def _process_chunk(
     dalda_chunk: pd.DataFrame,
     dalda_mapping: ColumnMapping,
@@ -594,6 +629,7 @@ def _process_chunk(
     index: _CensusIndex,
     settings: MatchSettings,
     dalda_name_col: str | None,
+    progress: _MatchProgress | None = None,
 ) -> list[dict[str, Any]]:
     rows_out: list[dict[str, Any]] = []
     for _, dalda_row in dalda_chunk.iterrows():
@@ -618,6 +654,8 @@ def _process_chunk(
                 out[out_key] = ""
 
         rows_out.append(out)
+        if progress:
+            progress.tick(1)
     return rows_out
 
 
@@ -646,11 +684,15 @@ def run_matching(
     index = build_census_index(census_df, census_name_col)
 
     n = len(dalda_prepared)
-    chunk_size = max(1, n // max(settings.worker_threads * 4, 1))
+    # Smaller chunks + per-outlet progress = UI updates every ~25 outlets (Pepsi-style)
+    chunk_size = min(250, max(50, n // max(settings.worker_threads * 8, 1)))
     chunks = [
         dalda_prepared.iloc[i : i + chunk_size]
         for i in range(0, n, chunk_size)
     ]
+
+    report_every = 25 if n > 500 else 10
+    match_progress = _MatchProgress(n, progress_callback, cancel_check, report_every)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -661,7 +703,6 @@ def run_matching(
         chunk_start_indices.append(pos)
         pos += len(ch)
 
-    completed = 0
     with ThreadPoolExecutor(max_workers=settings.worker_threads) as executor:
         futures = {}
         for start, chunk in zip(chunk_start_indices, chunks):
@@ -675,6 +716,7 @@ def run_matching(
                 index,
                 settings,
                 dalda_name_col,
+                match_progress,
             )
             futures[fut] = start
 
@@ -685,9 +727,8 @@ def run_matching(
             chunk_rows = fut.result()
             for i, row in enumerate(chunk_rows):
                 all_rows[start + i] = row
-            completed += len(chunk_rows)
-            if progress_callback:
-                progress_callback(completed, n)
+
+    match_progress.finish()
 
     result_df = pd.DataFrame(all_rows)
 

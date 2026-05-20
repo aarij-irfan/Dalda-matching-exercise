@@ -51,6 +51,7 @@ class DaldaMatcherWindow(QMainWindow):
         self._workers: list = []
         self._dalda_columns: list[str] = []
         self._census_columns: list[str] = []
+        self._last_progress_log_pct = -1
 
         self._build_ui()
         self._refresh_census_list()
@@ -483,6 +484,7 @@ class DaldaMatcherWindow(QMainWindow):
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
+        self._last_progress_log_pct = -1
         self._log("Starting match…")
 
         self._match_worker = MatchWorker(
@@ -508,6 +510,10 @@ class DaldaMatcherWindow(QMainWindow):
         self.progress_bar.setMaximum(maximum)
         self.progress_bar.setValue(value)
         self.status_bar.showMessage(message)
+        # Also log to Run tab (every ~2% so it feels like Pepsi console output)
+        if value - self._last_progress_log_pct >= 2 or value >= maximum:
+            self._log(message)
+            self._last_progress_log_pct = value
 
     def _on_match_done(self, result_df, stats):
         self.run_btn.setEnabled(True)

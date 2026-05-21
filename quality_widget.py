@@ -52,8 +52,9 @@ class DaldaQualityWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Check Dalda outlet file before matching: duplicates (ID, name, GPS, "
-                "full row), missing GPS, invalid coordinates, and match-ready counts."
+                "Check Dalda file before matching. True duplicates = rows identical on "
+                "ALL columns (not shop name alone). Export creates separate Excel files "
+                "per issue type for manual review."
             )
         )
 
@@ -82,7 +83,7 @@ class DaldaQualityWidget(QWidget):
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Run quality check")
         self.run_btn.clicked.connect(self._run)
-        self.export_btn = QPushButton("Export report…")
+        self.export_btn = QPushButton("Export all files to folder…")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export)
         btn_row.addWidget(self.run_btn)
@@ -163,25 +164,28 @@ class DaldaQualityWidget(QWidget):
         if not self._report:
             return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default = f"dalda_quality_report_{ts}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(
+        default_name = f"dalda_quality_report_{ts}"
+        folder = QFileDialog.getExistingDirectory(
             self,
-            "Save quality report",
-            default,
-            "Excel (*.xlsx);;CSV (*.csv)",
+            "Choose folder for quality report files",
+            default_name,
         )
-        if not path:
+        if not folder:
             return
-        if not path.lower().endswith((".xlsx", ".csv")):
-            path += ".xlsx"
+        report_folder = os.path.join(folder, default_name)
         try:
-            export_quality_report(self._report, path)
+            from dalda_quality_check import export_quality_report_folder
+
+            files = export_quality_report_folder(self._report, report_folder)
             QMessageBox.information(
                 self,
                 "Exported",
-                f"Report saved:\n{path}\n\n"
-                "Sheets: Summary, All_Rows, Rows_With_Issues (Excel) "
-                "or *_summary / *_issues_only (CSV).",
+                f"Saved {len(files)} files to:\n{report_folder}\n\n"
+                "Includes:\n"
+                "• 01_exact_duplicate_rows (all columns same)\n"
+                "• 02_duplicate_shop_id_only\n"
+                "• 03–09 GPS issue files\n"
+                "• 10_all_issues, 11_clean_match_ready",
             )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))

@@ -4,7 +4,8 @@ Dalda outlet file data-quality analysis: duplicates, GPS issues, summary stats.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,6 @@ import pandas as pd
 from matching_engine import (
     ColumnMapping,
     load_table,
-    normalize_text,
     parse_gps_value,
     suggest_column_mapping,
 )
@@ -20,6 +20,10 @@ from matching_engine import (
 # Rough Pakistan bounding box (suspicious if outside — not always wrong)
 PAK_LAT_MIN, PAK_LAT_MAX = 23.0, 37.5
 PAK_LON_MIN, PAK_LON_MAX = 60.5, 77.5
+
+# Original data columns only (no underscore meta columns)
+def _data_columns(df: pd.DataFrame) -> list[str]:
+    return [c for c in df.columns if not str(c).startswith("_")]
 
 
 @dataclass
@@ -31,16 +35,14 @@ class QualitySummary:
     out_of_range_gps: int = 0
     outside_pakistan_gps: int = 0
     duplicate_shop_id: int = 0
-    duplicate_shop_name: int = 0
     duplicate_gps: int = 0
-    duplicate_full_row: int = 0
-    any_duplicate: int = 0
+    exact_duplicate_row: int = 0
+    exact_duplicate_groups: int = 0
+    duplicate_shop_id_groups: int = 0
+    duplicate_gps_groups: int = 0
     any_gps_issue: int = 0
     any_issue: int = 0
     clean_rows: int = 0
-    duplicate_shop_id_groups: int = 0
-    duplicate_name_groups: int = 0
-    duplicate_gps_groups: int = 0
 
     def to_lines(self) -> list[str]:
         t = max(self.total_rows, 1)
@@ -57,33 +59,34 @@ class QualitySummary:
             f"  Outside Pakistan box:    {pct(self.outside_pakistan_gps)}",
             f"  Any GPS issue:           {pct(self.any_gps_issue)}",
             "",
-            "── Duplicates (rows involved) ──",
-            f"  Duplicate shop ID:       {pct(self.duplicate_shop_id)}"
+            "── Duplicates (separate checks; name NOT flagged) ──",
+            f"  Exact duplicate row:     {pct(self.exact_duplicate_row)}"
             + (
-                f"  [{self.duplicate_shop_id_groups:,} duplicate ID groups]"
+                f"  [{self.exact_duplicate_groups:,} identical-row groups]"
+                if self.exact_duplicate_groups
+                else ""
+            ),
+            "      (all data columns exactly the same — true duplicates)",
+            f"  Duplicate shop ID only:  {pct(self.duplicate_shop_id)}"
+            + (
+                f"  [{self.duplicate_shop_id_groups:,} ID groups]"
                 if self.duplicate_shop_id_groups
                 else ""
             ),
-            f"  Duplicate outlet name:   {pct(self.duplicate_shop_name)}"
+            "      (same ID, other columns may differ — check export file)",
+            f"  Duplicate GPS only:      {pct(self.duplicate_gps)}"
             + (
-                f"  [{self.duplicate_name_groups:,} duplicate name groups]"
-                if self.duplicate_name_groups
-                else ""
-            ),
-            f"  Duplicate GPS location:  {pct(self.duplicate_gps)}"
-            + (
-                f"  [{self.duplicate_gps_groups:,} duplicate GPS groups]"
+                f"  [{self.duplicate_gps_groups:,} GPS groups]"
                 if self.duplicate_gps_groups
                 else ""
             ),
-            f"  Exact duplicate row:     {pct(self.duplicate_full_row)}",
-            f"  Any duplicate flag:      {pct(self.any_duplicate)}",
             "",
             "── Summary ──",
             f"  Rows with ANY issue:     {pct(self.any_issue)}",
             f"  Clean rows (match-ready):{pct(self.clean_rows)}",
             "",
-            "Clean = valid GPS and not flagged as duplicate (ID, name, GPS, or full row).",
+            "Clean = valid GPS and NOT an exact duplicate row (all columns).",
+            "Duplicate shop names alone are NOT flagged (many shops share names).",
         ]
 
 
@@ -92,10 +95,10 @@ class QualityReport:
     summary: QualitySummary
     flagged_df: pd.DataFrame
     mapping: ColumnMapping
+    slices: dict[str, pd.DataFrame]
 
 
 def _resolve_row_gps(row: pd.Series, mapping: ColumnMapping) -> tuple[float | None, float | None, str]:
-    """Return lat, lon, gps_status: ok | missing | invalid | zero | out_of_range | outside_pakistan."""
     lat_col, lon_col, gps_col = mapping.latitude, mapping.longitude, mapping.gps_combined
     lat, lon = None, None
 
@@ -135,6 +138,12 @@ def _non_empty_key(val) -> str | None:
     return s if s else None
 
 
+def _row_content_key(df: pd.DataFrame) -> pd.Series:
+    """Fingerprint from ALL data columns (exact row duplicate detection)."""
+    data = df[_data_columns(df)].fillna("").astype(str)
+    return data.agg("\x1f".join, axis=1)
+
+
 def analyze_dalda_file(
     path: str,
     mapping: ColumnMapping | None = None,
@@ -171,31 +180,34 @@ def analyze_dalda_file(
     out["_longitude_parsed"] = longitudes
     out["_gps_status"] = gps_statuses
 
-    # --- Duplicate shop ID ---
+    # --- Exact duplicate: every data column identical ---
+    content_key = _row_content_key(df)
+    key_counts = content_key.value_counts()
+    exact_dup_mask = content_key.map(lambda k: key_counts[k] > 1)
+    exact_dup_groups = int((key_counts > 1).sum())
+    group_labels = {}
+    gid = 1
+    for k, cnt in key_counts.items():
+        if cnt > 1:
+            group_labels[k] = f"EXACT_DUP_{gid:05d}"
+            gid += 1
+    out["_exact_dup_group"] = content_key.map(lambda k: group_labels.get(k, ""))
+
+    for i in range(n):
+        if exact_dup_mask.iloc[i]:
+            issues[i].append("exact_duplicate_row")
+
+    # --- Duplicate shop ID (informational; not same as exact row) ---
     id_groups = 0
     if mapping.shop_id and mapping.shop_id in df.columns:
         ids = df[mapping.shop_id].map(_non_empty_key)
         id_dup_mask = ids.notna() & ids.duplicated(keep=False)
-        id_groups = ids[ids.notna()].value_counts()
-        id_groups = int((id_groups > 1).sum())
+        id_groups = int((ids[ids.notna()].value_counts() > 1).sum())
         for i in range(n):
             if id_dup_mask.iloc[i]:
                 issues[i].append("duplicate_shop_id")
 
-    # --- Duplicate outlet name (normalized) ---
-    name_groups = 0
-    if mapping.shop_name and mapping.shop_name in df.columns:
-        names = df[mapping.shop_name].map(
-            lambda x: normalize_text(x) if _non_empty_key(x) else None
-        )
-        name_dup_mask = names.notna() & names.duplicated(keep=False)
-        ng = names[names.notna()].value_counts()
-        name_groups = int((ng > 1).sum())
-        for i in range(n):
-            if name_dup_mask.iloc[i]:
-                issues[i].append("duplicate_name")
-
-    # --- Duplicate GPS (rounded) ---
+    # --- Duplicate GPS (informational) ---
     gps_groups = 0
     gps_keys = []
     for i in range(n):
@@ -205,32 +217,16 @@ def analyze_dalda_file(
             gps_keys.append(None)
     gps_series = pd.Series(gps_keys)
     gps_dup_mask = gps_series.notna() & gps_series.duplicated(keep=False)
-    gg = gps_series[gps_series.notna()].value_counts()
-    gps_groups = int((gg > 1).sum())
+    gps_groups = int((gps_series[gps_series.notna()].value_counts() > 1).sum())
     for i in range(n):
         if gps_dup_mask.iloc[i]:
             issues[i].append("duplicate_gps")
 
-    # --- Exact duplicate rows ---
-    row_dup_mask = df.duplicated(keep=False)
-    for i in range(n):
-        if row_dup_mask.iloc[i]:
-            issues[i].append("duplicate_full_row")
-
     out["_quality_issues"] = ["; ".join(x) if x else "" for x in issues]
     out["_has_issue"] = out["_quality_issues"] != ""
 
-    dup_flags = {
-        "duplicate_shop_id",
-        "duplicate_name",
-        "duplicate_gps",
-        "duplicate_full_row",
-    }
-    any_dup = [any(f in issues[i] for f in dup_flags) for i in range(n)]
     gps_bad = [gps_statuses[i] != "ok" for i in range(n)]
-    clean = [
-        gps_statuses[i] == "ok" and not any_dup[i] for i in range(n)
-    ]
+    clean = [gps_statuses[i] == "ok" and not exact_dup_mask.iloc[i] for i in range(n)]
 
     summary = QualitySummary(
         total_rows=n,
@@ -240,19 +236,41 @@ def analyze_dalda_file(
         out_of_range_gps=sum(1 for s in gps_statuses if s == "out_of_range"),
         outside_pakistan_gps=sum(1 for s in gps_statuses if s == "outside_pakistan"),
         duplicate_shop_id=sum(1 for i in range(n) if "duplicate_shop_id" in issues[i]),
-        duplicate_shop_name=sum(1 for i in range(n) if "duplicate_name" in issues[i]),
         duplicate_gps=sum(1 for i in range(n) if "duplicate_gps" in issues[i]),
-        duplicate_full_row=int(row_dup_mask.sum()),
+        exact_duplicate_row=int(exact_dup_mask.sum()),
+        exact_duplicate_groups=exact_dup_groups,
         duplicate_shop_id_groups=id_groups,
-        duplicate_name_groups=name_groups,
         duplicate_gps_groups=gps_groups,
-        any_duplicate=sum(any_dup),
         any_gps_issue=sum(gps_bad),
         any_issue=int(out["_has_issue"].sum()),
         clean_rows=sum(clean),
     )
 
-    return QualityReport(summary=summary, flagged_df=out, mapping=mapping)
+    def _slice(mask) -> pd.DataFrame:
+        return out.loc[mask].copy()
+
+    id_mask = pd.Series(
+        ["duplicate_shop_id" in issues[i] for i in range(n)], index=out.index
+    )
+    gps_issue_mask = pd.Series(gps_bad, index=out.index)
+
+    slices = {
+        "exact_duplicate_rows": _slice(exact_dup_mask),
+        "duplicate_shop_id_rows": _slice(id_mask & ~exact_dup_mask),
+        "duplicate_gps_rows": _slice(
+            out["_quality_issues"].str.contains("duplicate_gps", na=False)
+        ),
+        "missing_gps_rows": _slice(pd.Series(gps_statuses) == "missing"),
+        "invalid_gps_rows": _slice(pd.Series(gps_statuses) == "invalid"),
+        "zero_gps_rows": _slice(pd.Series(gps_statuses) == "zero"),
+        "out_of_range_gps_rows": _slice(pd.Series(gps_statuses) == "out_of_range"),
+        "outside_pakistan_gps_rows": _slice(pd.Series(gps_statuses) == "outside_pakistan"),
+        "any_gps_issue_rows": _slice(gps_issue_mask),
+        "all_rows_with_any_issue": _slice(out["_has_issue"]),
+        "clean_match_ready_rows": _slice(pd.Series(clean, index=out.index)),
+    }
+
+    return QualityReport(summary=summary, flagged_df=out, mapping=mapping, slices=slices)
 
 
 def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
@@ -265,37 +283,101 @@ def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
         ("Out of range lat/lon", s.out_of_range_gps, f"{100 * s.out_of_range_gps / t:.2f}%"),
         ("Outside Pakistan GPS box", s.outside_pakistan_gps, f"{100 * s.outside_pakistan_gps / t:.2f}%"),
         ("Any GPS issue", s.any_gps_issue, f"{100 * s.any_gps_issue / t:.2f}%"),
-        ("Duplicate shop ID (rows)", s.duplicate_shop_id, f"{100 * s.duplicate_shop_id / t:.2f}%"),
-        ("Duplicate ID groups", s.duplicate_shop_id_groups, ""),
-        ("Duplicate outlet name (rows)", s.duplicate_shop_name, f"{100 * s.duplicate_shop_name / t:.2f}%"),
-        ("Duplicate name groups", s.duplicate_name_groups, ""),
-        ("Duplicate GPS location (rows)", s.duplicate_gps, f"{100 * s.duplicate_gps / t:.2f}%"),
+        ("Exact duplicate row (all columns)", s.exact_duplicate_row, f"{100 * s.exact_duplicate_row / t:.2f}%"),
+        ("Exact duplicate groups", s.exact_duplicate_groups, ""),
+        ("Duplicate shop ID only (rows)", s.duplicate_shop_id, f"{100 * s.duplicate_shop_id / t:.2f}%"),
+        ("Duplicate shop ID groups", s.duplicate_shop_id_groups, ""),
+        ("Duplicate GPS only (rows)", s.duplicate_gps, f"{100 * s.duplicate_gps / t:.2f}%"),
         ("Duplicate GPS groups", s.duplicate_gps_groups, ""),
-        ("Exact duplicate row", s.duplicate_full_row, f"{100 * s.duplicate_full_row / t:.2f}%"),
-        ("Any duplicate flag", s.any_duplicate, f"{100 * s.any_duplicate / t:.2f}%"),
         ("Rows with ANY issue", s.any_issue, f"{100 * s.any_issue / t:.2f}%"),
         ("Clean rows (match-ready)", s.clean_rows, f"{100 * s.clean_rows / t:.2f}%"),
     ]
     return pd.DataFrame(rows, columns=["Metric", "Count", "Percent"])
 
 
-def export_quality_report(report: QualityReport, output_path: str) -> None:
-    """Write summary + all rows + issue-only rows to Excel or CSV."""
+def export_quality_report_folder(report: QualityReport, folder_path: str) -> list[str]:
+    """
+    Export one file per issue type into a folder for manual review.
+    Returns list of written file paths.
+    """
+    os.makedirs(folder_path, exist_ok=True)
+    written: list[str] = []
+
+    summary_path = os.path.join(folder_path, "00_Summary.xlsx")
+    with pd.ExcelWriter(summary_path, engine="openpyxl") as writer:
+        _summary_metrics_table(report.summary).to_excel(writer, sheet_name="Metrics", index=False)
+        pd.DataFrame({"Line": report.summary.to_lines()}).to_excel(
+            writer, sheet_name="Report_Text", index=False
+        )
+    written.append(summary_path)
+
+    file_map = [
+        ("01_exact_duplicate_rows_ALL_COLUMNS_SAME.xlsx", "exact_duplicate_rows"),
+        ("02_duplicate_shop_id_ONLY_not_exact_row.xlsx", "duplicate_shop_id_rows"),
+        ("03_duplicate_gps_location.xlsx", "duplicate_gps_rows"),
+        ("04_missing_gps.xlsx", "missing_gps_rows"),
+        ("05_invalid_gps.xlsx", "invalid_gps_rows"),
+        ("06_zero_gps.xlsx", "zero_gps_rows"),
+        ("07_out_of_range_gps.xlsx", "out_of_range_gps_rows"),
+        ("08_outside_pakistan_gps.xlsx", "outside_pakistan_gps_rows"),
+        ("09_any_gps_issue.xlsx", "any_gps_issue_rows"),
+        ("10_all_rows_with_any_issue.xlsx", "all_rows_with_any_issue"),
+        ("11_clean_match_ready.xlsx", "clean_match_ready_rows"),
+        ("12_all_rows_flagged_copy.xlsx", None),
+    ]
+
+    for filename, key in file_map:
+        path = os.path.join(folder_path, filename)
+        if key is None:
+            df = report.flagged_df
+        else:
+            df = report.slices.get(key, pd.DataFrame())
+        if filename.endswith(".xlsx"):
+            if len(df) == 0:
+                pd.DataFrame({"message": ["No rows"]}).to_excel(path, index=False)
+            else:
+                df.to_excel(path, index=False)
+        written.append(path)
+
+    return written
+
+
+def export_quality_report(report: QualityReport, output_path: str) -> str:
+    """
+    Export to a folder (if path ends with / or no extension) or single Excel workbook.
+    Returns actual output path (folder or file).
+    """
+    if output_path.endswith(os.sep) or (
+        not output_path.lower().endswith((".xlsx", ".csv", ".xls"))
+    ):
+        folder = output_path.rstrip(os.sep)
+        if not folder:
+            folder = output_path
+        export_quality_report_folder(report, folder)
+        return folder
+
     summary_df = _summary_metrics_table(report.summary)
     flagged = report.flagged_df
-    issues_only = flagged[flagged["_has_issue"]].copy()
-
     lower = output_path.lower()
+
     if lower.endswith(".csv"):
-        flagged.to_csv(output_path, index=False, encoding="utf-8-sig")
         base = output_path.rsplit(".", 1)[0]
+        parent = os.path.dirname(base) or "."
+        name = os.path.basename(base)
+        folder = os.path.join(parent, f"{name}_files")
+        export_quality_report_folder(report, folder)
         summary_df.to_csv(f"{base}_summary.csv", index=False, encoding="utf-8-sig")
-        issues_only.to_csv(f"{base}_issues_only.csv", index=False, encoding="utf-8-sig")
-    else:
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            summary_df.to_excel(writer, sheet_name="Summary", index=False)
-            pd.DataFrame({"Report": report.summary.to_lines()}).to_excel(
-                writer, sheet_name="Summary_Text", index=False
+        return folder
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame({"Report": report.summary.to_lines()}).to_excel(
+            writer, sheet_name="Summary_Text", index=False
+        )
+        for key, df in report.slices.items():
+            sheet = key[:31]
+            (df if len(df) else pd.DataFrame({"message": ["No rows"]})).to_excel(
+                writer, sheet_name=sheet, index=False
             )
-            flagged.to_excel(writer, sheet_name="All_Rows", index=False)
-            issues_only.to_excel(writer, sheet_name="Rows_With_Issues", index=False)
+        flagged.to_excel(writer, sheet_name="All_Rows_Flagged", index=False)
+    return output_path

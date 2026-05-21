@@ -36,10 +36,12 @@ class QualitySummary:
     outside_pakistan_gps: int = 0
     duplicate_shop_id: int = 0
     duplicate_gps: int = 0
+    duplicate_gps_5dp: int = 0
     exact_duplicate_row: int = 0
     exact_duplicate_groups: int = 0
     duplicate_shop_id_groups: int = 0
     duplicate_gps_groups: int = 0
+    duplicate_gps_5dp_groups: int = 0
     any_gps_issue: int = 0
     outside_city_boundary: int = 0
     within_city_boundary: int = 0
@@ -85,6 +87,13 @@ class QualitySummary:
                 else ""
             ),
             "      (exact same GPS text or exact lat,lon — no rounding)",
+            f"  Duplicate GPS (5 decimals): {pct(self.duplicate_gps_5dp)}"
+            + (
+                f"  [{self.duplicate_gps_5dp_groups:,} rounded-location groups]"
+                if self.duplicate_gps_5dp_groups
+                else ""
+            ),
+            "      (lat/lon rounded to 5 decimals — separate review export only)",
             "",
             "── City boundaries (5 km buffer) ──",
             f"  Outside city (> {self.boundary_buffer_km:.0f} km): {pct(self.outside_city_boundary)}",
@@ -142,6 +151,11 @@ def _resolve_row_gps(row: pd.Series, mapping: ColumnMapping) -> tuple[float | No
     if not (PAK_LAT_MIN <= lat <= PAK_LAT_MAX and PAK_LON_MIN <= lon <= PAK_LON_MAX):
         return lat, lon, "outside_pakistan"
     return lat, lon, "ok"
+
+
+def _gps_key_5decimal(lat: float, lon: float) -> str:
+    """Same location within ~1.1 m when lat/lon rounded to 5 decimal places."""
+    return f"{round(float(lat), 5)},{round(float(lon), 5)}"
 
 
 def _non_empty_key(val) -> str | None:
@@ -247,6 +261,25 @@ def analyze_dalda_file(
         if gps_dup_mask.iloc[i]:
             issues[i].append("duplicate_gps")
 
+    # --- Duplicate GPS at 5 decimals (separate; does not affect clean / any_issue) ---
+    gps_5dp_keys: list[str | None] = []
+    for i in range(n):
+        if gps_statuses[i] != "ok":
+            gps_5dp_keys.append(None)
+            continue
+        gps_5dp_keys.append(_gps_key_5decimal(latitudes[i], longitudes[i]))
+    gps_5dp_series = pd.Series(gps_5dp_keys)
+    gps_5dp_dup_mask = gps_5dp_series.notna() & gps_5dp_series.duplicated(keep=False)
+    gps_5dp_groups = int((gps_5dp_series[gps_5dp_series.notna()].value_counts() > 1).sum())
+    gps_5dp_group_labels: dict[str, str] = {}
+    gid_5 = 1
+    for k, cnt in gps_5dp_series[gps_5dp_series.notna()].value_counts().items():
+        if cnt > 1:
+            gps_5dp_group_labels[k] = f"GPS_5DP_{gid_5:05d}"
+            gid_5 += 1
+    out["_gps_key_5decimal"] = gps_5dp_series
+    out["_gps_dup_5dp_group"] = gps_5dp_series.map(lambda k: gps_5dp_group_labels.get(k, "") if k else "")
+
     outside_boundary_mask = pd.Series([False] * n, index=out.index)
     boundary_map_path = ""
 
@@ -315,6 +348,8 @@ def analyze_dalda_file(
         exact_duplicate_groups=exact_dup_groups,
         duplicate_shop_id_groups=id_groups,
         duplicate_gps_groups=gps_groups,
+        duplicate_gps_5dp=int(gps_5dp_dup_mask.sum()),
+        duplicate_gps_5dp_groups=gps_5dp_groups,
         any_gps_issue=sum(gps_bad),
         outside_city_boundary=outside_bnd_count,
         within_city_boundary=within_bnd,
@@ -338,6 +373,7 @@ def analyze_dalda_file(
         "duplicate_gps_rows": _slice(
             out["_quality_issues"].str.contains("duplicate_gps", na=False)
         ),
+        "duplicate_gps_5dp_rows": _slice(gps_5dp_dup_mask),
         "missing_gps_rows": _slice(pd.Series(gps_statuses) == "missing"),
         "invalid_gps_rows": _slice(pd.Series(gps_statuses) == "invalid"),
         "zero_gps_rows": _slice(pd.Series(gps_statuses) == "zero"),
@@ -395,8 +431,14 @@ def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
         ("Exact duplicate groups", s.exact_duplicate_groups, ""),
         ("Duplicate shop ID only (rows)", s.duplicate_shop_id, f"{100 * s.duplicate_shop_id / t:.2f}%"),
         ("Duplicate shop ID groups", s.duplicate_shop_id_groups, ""),
-        ("Duplicate GPS only (rows)", s.duplicate_gps, f"{100 * s.duplicate_gps / t:.2f}%"),
-        ("Duplicate GPS groups", s.duplicate_gps_groups, ""),
+        ("Duplicate GPS only — exact (rows)", s.duplicate_gps, f"{100 * s.duplicate_gps / t:.2f}%"),
+        ("Duplicate GPS exact groups", s.duplicate_gps_groups, ""),
+        (
+            "Duplicate GPS — 5 decimal places (rows)",
+            s.duplicate_gps_5dp,
+            f"{100 * s.duplicate_gps_5dp / t:.2f}%",
+        ),
+        ("Duplicate GPS 5dp groups", s.duplicate_gps_5dp_groups, ""),
         (
             f"Outside city boundary (>{s.boundary_buffer_km:.0f} km)",
             s.outside_city_boundary,
@@ -434,7 +476,8 @@ def export_quality_report_folder(report: QualityReport, folder_path: str) -> lis
     file_map = [
         ("01_exact_duplicate_rows_ALL_COLUMNS_SAME.xlsx", "exact_duplicate_rows"),
         ("02_duplicate_shop_id_ONLY_not_exact_row.xlsx", "duplicate_shop_id_rows"),
-        ("03_duplicate_gps_location.xlsx", "duplicate_gps_rows"),
+        ("03_duplicate_gps_exact_location.xlsx", "duplicate_gps_rows"),
+        ("03b_duplicate_gps_5decimal_locations.xlsx", "duplicate_gps_5dp_rows"),
         ("04_missing_gps.xlsx", "missing_gps_rows"),
         ("05_invalid_gps.xlsx", "invalid_gps_rows"),
         ("06_zero_gps.xlsx", "zero_gps_rows"),

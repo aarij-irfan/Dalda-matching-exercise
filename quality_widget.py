@@ -217,6 +217,7 @@ class DaldaQualityWidget(QWidget):
                 "Includes:\n"
                 "• 01_exact_duplicate_rows (all columns same)\n"
                 "• 02_duplicate_shop_id_only\n"
+                "• 03 exact GPS dup, 03b GPS dup (5 decimals, separate)\n"
                 "• 11_outside_city_boundary, 13_clean_match_ready\n"
                 "• 15_city_boundary_map.png",
             )

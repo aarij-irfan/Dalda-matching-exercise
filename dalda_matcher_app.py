@@ -40,6 +40,7 @@ from app_paths import app_base_dir, default_census_dir
 from file_viewer import FileViewerWidget
 from match_worker import LoadPreviewWorker, MatchWorker, auto_detect_mappings
 from quality_widget import DaldaQualityWidget
+from overlap_widget import OverlapCheckWidget
 from matching_engine import ColumnMapping, MatchSettings, list_census_files
 
 
@@ -256,6 +257,9 @@ class DaldaMatcherWindow(QMainWindow):
         # --- Data quality tab ---
         self.quality_widget = DaldaQualityWidget()
         tabs.addTab(self.quality_widget, "Data quality")
+
+        self.overlap_widget = OverlapCheckWidget()
+        tabs.addTab(self.overlap_widget, "Issues vs matched")
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)

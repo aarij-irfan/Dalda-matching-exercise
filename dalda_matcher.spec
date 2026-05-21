@@ -10,9 +10,14 @@ root = Path(SPECPATH)
 
 datas = [
     (str(root / "Census Database"), "Census Database"),
+    (str(root / "Boudaries"), "Boudaries"),
 ]
 
 hiddenimports = [
+    "shapely",
+    "shapely.geometry",
+    "matplotlib",
+    "boundary_check",
     "sklearn.neighbors._ball_tree",
     "sklearn.utils._cython_blas",
     "sklearn.utils._typedefs",

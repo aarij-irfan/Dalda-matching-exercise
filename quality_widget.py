@@ -7,6 +7,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -28,14 +29,20 @@ class QualityAnalysisWorker(QThread):
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, path: str, mapping: ColumnMapping):
+    def __init__(self, path: str, mapping: ColumnMapping, buffer_km: float):
         super().__init__()
         self.path = path
         self.mapping = mapping
+        self.buffer_km = buffer_km
 
     def run(self):
         try:
-            report = analyze_dalda_file(self.path, self.mapping)
+            report = analyze_dalda_file(
+                self.path,
+                self.mapping,
+                check_boundaries=True,
+                boundary_buffer_km=self.buffer_km,
+            )
             self.finished_ok.emit(report)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -52,11 +59,21 @@ class DaldaQualityWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Check Dalda file before matching. True duplicates = rows identical on "
-                "ALL columns (not shop name alone). Export creates separate Excel files "
-                "per issue type for manual review."
+                "Check Dalda file before matching. Uses city boundaries (Faisalabad, "
+                "Gujranwala, Karachi, Lahore, Multan, Peshawar). Outlets >5 km outside "
+                "their city are flagged. Export = separate Excel files per issue."
             )
         )
+
+        bnd_row = QHBoxLayout()
+        bnd_row.addWidget(QLabel("Boundary buffer (km):"))
+        self.buffer_spin = QDoubleSpinBox()
+        self.buffer_spin.setRange(0, 50)
+        self.buffer_spin.setValue(5.0)
+        self.buffer_spin.setSingleStep(1.0)
+        bnd_row.addWidget(self.buffer_spin)
+        bnd_row.addStretch()
+        layout.addLayout(bnd_row)
 
         file_box = QGroupBox("Dalda file")
         file_form = QFormLayout(file_box)
@@ -86,8 +103,12 @@ class DaldaQualityWidget(QWidget):
         self.export_btn = QPushButton("Export all files to folder…")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export)
+        self.map_btn = QPushButton("View boundary map")
+        self.map_btn.setEnabled(False)
+        self.map_btn.clicked.connect(self._view_map)
         btn_row.addWidget(self.run_btn)
         btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.map_btn)
         layout.addLayout(btn_row)
 
         self.results = QTextEdit()
@@ -142,7 +163,7 @@ class DaldaQualityWidget(QWidget):
 
         self.run_btn.setEnabled(False)
         self.results.setPlainText("Analyzing… please wait.")
-        worker = QualityAnalysisWorker(path, mapping)
+        worker = QualityAnalysisWorker(path, mapping, self.buffer_spin.value())
         worker.finished_ok.connect(self._on_done)
         worker.failed.connect(self._on_fail)
         self._workers.append(worker)
@@ -152,8 +173,20 @@ class DaldaQualityWidget(QWidget):
         self._report = report
         self.run_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
+        self.map_btn.setEnabled(bool(report.boundary_map_path))
         lines = report.summary.to_lines()
-        self.results.setPlainText("\n".join(lines))
+        from boundary_check import TARGET_CITIES
+
+        extra = ["", "── Per city (outside > buffer) ──"]
+        if "_boundary_status" in report.flagged_df.columns:
+            for city in TARGET_CITIES:
+                sub = report.flagged_df[report.flagged_df["_boundary_city"] == city]
+                if len(sub) == 0:
+                    continue
+                out_n = int((sub["_boundary_status"] == "outside_boundary").sum())
+                ok_n = int((sub["_boundary_status"] == "within_buffer").sum())
+                extra.append(f"  {city}: outside={out_n:,}, ok={ok_n:,}")
+        self.results.setPlainText("\n".join(lines + extra))
 
     def _on_fail(self, err: str):
         self.run_btn.setEnabled(True)
@@ -184,8 +217,22 @@ class DaldaQualityWidget(QWidget):
                 "Includes:\n"
                 "• 01_exact_duplicate_rows (all columns same)\n"
                 "• 02_duplicate_shop_id_only\n"
-                "• 03–09 GPS issue files\n"
-                "• 10_all_issues, 11_clean_match_ready",
+                "• 11_outside_city_boundary, 13_clean_match_ready\n"
+                "• 15_city_boundary_map.png",
             )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def _view_map(self):
+        if not self._report or not self._report.boundary_map_path:
+            QMessageBox.information(self, "Map", "Run analysis first to generate the map.")
+            return
+        import os
+        import subprocess
+        import sys
+
+        path = self._report.boundary_map_path
+        if sys.platform == "win32":
+            os.startfile(path)
+        else:
+            subprocess.run(["xdg-open", path], check=False)

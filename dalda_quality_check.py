@@ -41,6 +41,10 @@ class QualitySummary:
     duplicate_shop_id_groups: int = 0
     duplicate_gps_groups: int = 0
     any_gps_issue: int = 0
+    outside_city_boundary: int = 0
+    within_city_boundary: int = 0
+    unknown_city_boundary: int = 0
+    boundary_buffer_km: float = 5.0
     any_issue: int = 0
     clean_rows: int = 0
 
@@ -82,13 +86,19 @@ class QualitySummary:
             ),
             "      (exact same GPS text or exact lat,lon — no rounding)",
             "",
+            "── City boundaries (5 km buffer) ──",
+            f"  Outside city (> {self.boundary_buffer_km:.0f} km): {pct(self.outside_city_boundary)}",
+            f"  Within city / buffer:      {pct(self.within_city_boundary)}",
+            f"  Unknown / unmapped city:   {pct(self.unknown_city_boundary)}",
+            "",
             "── Summary ──",
             f"  Rows with ANY issue:     {pct(self.any_issue)}",
             f"  Clean rows (match-ready):{pct(self.clean_rows)}",
             "",
-            "Clean = valid GPS, NOT exact duplicate row, NOT duplicate GPS location.",
+            "Clean = valid GPS, NOT exact duplicate row, NOT duplicate GPS,",
+            "NOT >5 km outside assigned city boundary (Faisalabad, Gujranwala,",
+            "Karachi, Lahore, Multan, Peshawar).",
             "Duplicate shop names alone are NOT flagged (many shops share names).",
-            "Duplicate shop ID only is exported separately but still counts as clean.",
         ]
 
 
@@ -98,6 +108,7 @@ class QualityReport:
     flagged_df: pd.DataFrame
     mapping: ColumnMapping
     slices: dict[str, pd.DataFrame]
+    boundary_map_path: str = ""
 
 
 def _resolve_row_gps(row: pd.Series, mapping: ColumnMapping) -> tuple[float | None, float | None, str]:
@@ -149,6 +160,9 @@ def _row_content_key(df: pd.DataFrame) -> pd.Series:
 def analyze_dalda_file(
     path: str,
     mapping: ColumnMapping | None = None,
+    check_boundaries: bool = True,
+    boundary_buffer_km: float = 5.0,
+    geojson_path: str | None = None,
 ) -> QualityReport:
     df = load_table(path)
     mapping = mapping or suggest_column_mapping(list(df.columns))
@@ -233,20 +247,60 @@ def analyze_dalda_file(
         if gps_dup_mask.iloc[i]:
             issues[i].append("duplicate_gps")
 
+    outside_boundary_mask = pd.Series([False] * n, index=out.index)
+    boundary_map_path = ""
+
+    if check_boundaries:
+        from boundary_check import check_boundaries, detect_city_column, save_boundary_map
+
+        city_col = detect_city_column(list(df.columns))
+        bnd = check_boundaries(
+            df,
+            latitudes,
+            longitudes,
+            gps_statuses,
+            city_col=city_col,
+            buffer_km=boundary_buffer_km,
+            geojson_path=geojson_path,
+        )
+        out["_boundary_city"] = bnd.assigned_city
+        out["_boundary_distance_m"] = bnd.distance_outside_m
+        out["_boundary_status"] = bnd.boundary_status
+
+        for i in range(n):
+            if bnd.boundary_status[i] == "outside_boundary":
+                issues[i].append("outside_city_boundary")
+                outside_boundary_mask.iloc[i] = True
+            elif bnd.boundary_status[i] == "unknown_city":
+                issues[i].append("unknown_city")
+                outside_boundary_mask.iloc[i] = True
+
     out["_quality_issues"] = ["; ".join(x) if x else "" for x in issues]
     out["_has_issue"] = out["_quality_issues"] != ""
 
     gps_bad = [gps_statuses[i] != "ok" for i in range(n)]
-    # Match-ready: good GPS and not a duplicate outlet (exact row or same GPS location)
     clean_mask = pd.Series(
         [
             gps_statuses[i] == "ok"
             and not exact_dup_mask.iloc[i]
             and not gps_dup_mask.iloc[i]
+            and not outside_boundary_mask.iloc[i]
             for i in range(n)
         ],
         index=out.index,
     )
+
+    outside_bnd_count = (
+        int((out["_boundary_status"] == "outside_boundary").sum())
+        if check_boundaries and "_boundary_status" in out.columns
+        else 0
+    )
+    within_bnd = int(
+        (out["_boundary_status"] == "within_buffer").sum()
+    ) if check_boundaries and "_boundary_status" in out.columns else 0
+    unknown_bnd = int(
+        (out["_boundary_status"] == "unknown_city").sum()
+    ) if check_boundaries and "_boundary_status" in out.columns else 0
 
     summary = QualitySummary(
         total_rows=n,
@@ -262,6 +316,10 @@ def analyze_dalda_file(
         duplicate_shop_id_groups=id_groups,
         duplicate_gps_groups=gps_groups,
         any_gps_issue=sum(gps_bad),
+        outside_city_boundary=outside_bnd_count,
+        within_city_boundary=within_bnd,
+        unknown_city_boundary=unknown_bnd,
+        boundary_buffer_km=boundary_buffer_km,
         any_issue=int(out["_has_issue"].sum()),
         clean_rows=int(clean_mask.sum()),
     )
@@ -289,8 +347,38 @@ def analyze_dalda_file(
         "all_rows_with_any_issue": _slice(out["_has_issue"]),
         "clean_match_ready_rows": _slice(clean_mask),
     }
+    if check_boundaries:
+        slices["outside_city_boundary_rows"] = _slice(
+            out["_boundary_status"] == "outside_boundary"
+        )
+        slices["unknown_city_rows"] = _slice(out["_boundary_status"] == "unknown_city")
+        try:
+            import tempfile
 
-    return QualityReport(summary=summary, flagged_df=out, mapping=mapping, slices=slices)
+            map_path = os.path.join(
+                tempfile.gettempdir(),
+                f"dalda_boundary_map_{os.getpid()}.png",
+            )
+            save_boundary_map(
+                df,
+                latitudes,
+                longitudes,
+                list(out["_boundary_status"]),
+                list(out["_boundary_city"]),
+                map_path,
+                geojson_path=geojson_path,
+            )
+            boundary_map_path = map_path
+        except Exception:
+            boundary_map_path = ""
+
+    return QualityReport(
+        summary=summary,
+        flagged_df=out,
+        mapping=mapping,
+        slices=slices,
+        boundary_map_path=boundary_map_path,
+    )
 
 
 def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
@@ -309,6 +397,13 @@ def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
         ("Duplicate shop ID groups", s.duplicate_shop_id_groups, ""),
         ("Duplicate GPS only (rows)", s.duplicate_gps, f"{100 * s.duplicate_gps / t:.2f}%"),
         ("Duplicate GPS groups", s.duplicate_gps_groups, ""),
+        (
+            f"Outside city boundary (>{s.boundary_buffer_km:.0f} km)",
+            s.outside_city_boundary,
+            f"{100 * s.outside_city_boundary / t:.2f}%",
+        ),
+        ("Within city / buffer", s.within_city_boundary, f"{100 * s.within_city_boundary / t:.2f}%"),
+        ("Unknown city", s.unknown_city_boundary, f"{100 * s.unknown_city_boundary / t:.2f}%"),
         ("Rows with ANY issue", s.any_issue, f"{100 * s.any_issue / t:.2f}%"),
         ("Clean rows (match-ready)", s.clean_rows, f"{100 * s.clean_rows / t:.2f}%"),
         (
@@ -347,9 +442,18 @@ def export_quality_report_folder(report: QualityReport, folder_path: str) -> lis
         ("08_outside_pakistan_gps.xlsx", "outside_pakistan_gps_rows"),
         ("09_any_gps_issue.xlsx", "any_gps_issue_rows"),
         ("10_all_rows_with_any_issue.xlsx", "all_rows_with_any_issue"),
-        ("11_clean_match_ready.xlsx", "clean_match_ready_rows"),
-        ("12_all_rows_flagged_copy.xlsx", None),
+        ("11_outside_city_boundary_5km.xlsx", "outside_city_boundary_rows"),
+        ("12_unknown_city.xlsx", "unknown_city_rows"),
+        ("13_clean_match_ready.xlsx", "clean_match_ready_rows"),
+        ("14_all_rows_flagged_copy.xlsx", None),
     ]
+
+    if report.boundary_map_path and os.path.isfile(report.boundary_map_path):
+        import shutil
+
+        map_dest = os.path.join(folder_path, "15_city_boundary_map.png")
+        shutil.copy2(report.boundary_map_path, map_dest)
+        written.append(map_dest)
 
     for filename, key in file_map:
         path = os.path.join(folder_path, filename)

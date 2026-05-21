@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 from app_paths import app_base_dir, default_census_dir
 from file_viewer import FileViewerWidget
 from match_worker import LoadPreviewWorker, MatchWorker, auto_detect_mappings
+from quality_widget import DaldaQualityWidget
 from matching_engine import ColumnMapping, MatchSettings, list_census_files
 
 
@@ -252,6 +253,10 @@ class DaldaMatcherWindow(QMainWindow):
         self.file_viewer = FileViewerWidget()
         tabs.addTab(self.file_viewer, "View file")
 
+        # --- Data quality tab ---
+        self.quality_widget = DaldaQualityWidget()
+        tabs.addTab(self.quality_widget, "Data quality")
+
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
@@ -339,6 +344,7 @@ class DaldaMatcherWindow(QMainWindow):
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.output_path_edit.setText(f"{base}_matched_{ts}.xlsx")
             self._load_dalda_preview(path)
+            self.quality_widget.set_dalda_path(path)
 
     def _load_dalda_preview(self, path: str):
         worker = LoadPreviewWorker(path)

@@ -85,8 +85,9 @@ class QualitySummary:
             f"  Rows with ANY issue:     {pct(self.any_issue)}",
             f"  Clean rows (match-ready):{pct(self.clean_rows)}",
             "",
-            "Clean = valid GPS and NOT an exact duplicate row (all columns).",
+            "Clean = valid GPS, NOT exact duplicate row, NOT duplicate GPS location.",
             "Duplicate shop names alone are NOT flagged (many shops share names).",
+            "Duplicate shop ID only is exported separately but still counts as clean.",
         ]
 
 
@@ -226,7 +227,16 @@ def analyze_dalda_file(
     out["_has_issue"] = out["_quality_issues"] != ""
 
     gps_bad = [gps_statuses[i] != "ok" for i in range(n)]
-    clean = [gps_statuses[i] == "ok" and not exact_dup_mask.iloc[i] for i in range(n)]
+    # Match-ready: good GPS and not a duplicate outlet (exact row or same GPS location)
+    clean_mask = pd.Series(
+        [
+            gps_statuses[i] == "ok"
+            and not exact_dup_mask.iloc[i]
+            and not gps_dup_mask.iloc[i]
+            for i in range(n)
+        ],
+        index=out.index,
+    )
 
     summary = QualitySummary(
         total_rows=n,
@@ -243,7 +253,7 @@ def analyze_dalda_file(
         duplicate_gps_groups=gps_groups,
         any_gps_issue=sum(gps_bad),
         any_issue=int(out["_has_issue"].sum()),
-        clean_rows=sum(clean),
+        clean_rows=int(clean_mask.sum()),
     )
 
     def _slice(mask) -> pd.DataFrame:
@@ -267,7 +277,7 @@ def analyze_dalda_file(
         "outside_pakistan_gps_rows": _slice(pd.Series(gps_statuses) == "outside_pakistan"),
         "any_gps_issue_rows": _slice(gps_issue_mask),
         "all_rows_with_any_issue": _slice(out["_has_issue"]),
-        "clean_match_ready_rows": _slice(pd.Series(clean, index=out.index)),
+        "clean_match_ready_rows": _slice(clean_mask),
     }
 
     return QualityReport(summary=summary, flagged_df=out, mapping=mapping, slices=slices)
@@ -291,6 +301,11 @@ def _summary_metrics_table(s: QualitySummary) -> pd.DataFrame:
         ("Duplicate GPS groups", s.duplicate_gps_groups, ""),
         ("Rows with ANY issue", s.any_issue, f"{100 * s.any_issue / t:.2f}%"),
         ("Clean rows (match-ready)", s.clean_rows, f"{100 * s.clean_rows / t:.2f}%"),
+        (
+            "Excluded from clean (GPS+dup GPS+exact row)",
+            t - s.clean_rows,
+            f"{100 * (t - s.clean_rows) / t:.2f}%",
+        ),
     ]
     return pd.DataFrame(rows, columns=["Metric", "Count", "Percent"])
 

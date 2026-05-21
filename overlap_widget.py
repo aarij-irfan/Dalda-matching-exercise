@@ -173,6 +173,12 @@ class OverlapCheckWidget(QWidget):
         out = os.path.join(folder, f"overlap_check_{ts}")
         try:
             export_overlap_report(self._report, out)
-            QMessageBox.information(self, "Exported", f"Saved to:\n{out}")
+            QMessageBox.information(
+                self,
+                "Exported",
+                f"Saved to:\n{out}\n\n"
+                f"Use 04_matched_without_overlap.xlsx ({self._report.matched_without_overlap_count:,} rows) "
+                f"as your clean matched file.",
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))

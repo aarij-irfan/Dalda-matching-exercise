@@ -80,6 +80,7 @@ class QualitySummary:
                 if self.duplicate_gps_groups
                 else ""
             ),
+            "      (exact same GPS text or exact lat,lon — no rounding)",
             "",
             "── Summary ──",
             f"  Rows with ANY issue:     {pct(self.any_issue)}",
@@ -208,14 +209,23 @@ def analyze_dalda_file(
             if id_dup_mask.iloc[i]:
                 issues[i].append("duplicate_shop_id")
 
-    # --- Duplicate GPS (informational) ---
+    # --- Duplicate GPS: exact same coordinates (no rounding) ---
     gps_groups = 0
-    gps_keys = []
+    gps_keys: list[str | None] = []
+    gps_col = mapping.gps_combined
     for i in range(n):
-        if gps_statuses[i] == "ok":
-            gps_keys.append(f"{latitudes[i]:.5f},{longitudes[i]:.5f}")
-        else:
+        if gps_statuses[i] != "ok":
             gps_keys.append(None)
+            continue
+        row = df.iloc[i]
+        # Prefer exact text from Dalda GPS column when available
+        if gps_col and gps_col in df.columns:
+            raw_gps = _non_empty_key(row.get(gps_col))
+            if raw_gps:
+                gps_keys.append(raw_gps)
+                continue
+        # Otherwise exact parsed lat,lon (full precision, not rounded)
+        gps_keys.append(f"{latitudes[i]},{longitudes[i]}")
     gps_series = pd.Series(gps_keys)
     gps_dup_mask = gps_series.notna() & gps_series.duplicated(keep=False)
     gps_groups = int((gps_series[gps_series.notna()].value_counts() > 1).sum())
